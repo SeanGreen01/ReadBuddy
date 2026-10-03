@@ -5,7 +5,7 @@ import { NextResponse } from "next/server";
 // WebSocket without ever seeing the permanent ElevenLabs API key.
 // The token expires after ~15 minutes (enforced by ElevenLabs).
 
-export async function POST() {
+export async function POST(req: Request) {
   const apiKey = process.env.ELEVENLABS_API_KEY;
   if (!apiKey) {
     return NextResponse.json(
@@ -19,6 +19,7 @@ export async function POST() {
       "https://api.elevenlabs.io/v1/single-use-token/realtime_scribe",
       {
         method: "POST",
+        signal: AbortSignal.any([req.signal, AbortSignal.timeout(15_000)]),
         headers: { "xi-api-key": apiKey },
       }
     );

@@ -1,7 +1,7 @@
 # Read Along (ReadBuddy)
 
 A patient, browser-based **reading companion**. It follows a reader through a
-short passage one sentence at a time, notices likely word mismatches after a
+short passage across sentences, notices well-supported word mismatches after a
 pause, and offers gentle, optional spoken help. The reader can retry, hear the
 word, ask for a short meaning, or keep going at their own pace.
 
@@ -15,7 +15,7 @@ word, ask for a short meaning, or keep going at their own pace.
 
 - **Next.js 16 + TypeScript** (App Router), Tailwind v4
 - **ElevenLabs** Scribe `scribe_v2_realtime` for live listening and
-  `eleven_flash_v2_5` for spoken prompts (via `@elevenlabs/react` + REST)
+  `eleven_flash_v2_5` for spoken prompts (via `@elevenlabs/client` + REST)
 - **Qwen3 4B/8B** (open weight, Apache 2.0) for optional word explanations,
   with a reviewed offline fallback
 
@@ -35,7 +35,7 @@ npm run dev                         # http://localhost:3000
 | Variable              | Required | Purpose                                                        |
 | --------------------- | -------- | -------------------------------------------------------------- |
 | `ELEVENLABS_API_KEY`  | yes      | Listening + speaking. Stays server-side only.                  |
-| `ELEVENLABS_VOICE_ID` | no       | Preselected prompt voice (defaults to "Rachel").               |
+| `ELEVENLABS_VOICE_ID` | no       | Preselected prompt voice (defaults to "Sarah").               |
 | `QWEN_API_URL`        | no       | OpenAI-compatible chat-completions URL for the Explain feature.|
 | `QWEN_MODEL`          | no       | Model name (default `qwen3-4b`).                               |
 | `QWEN_API_KEY`        | no       | Bearer token for the Qwen endpoint, if it needs one.           |
@@ -58,13 +58,26 @@ Without `QWEN_API_URL`, **Explain** returns a short reviewed definition labelled
    stable ids (`lib/normalize.ts`).
 2. **Start** opens the mic via Scribe. Partial text shows live; committed text
    drives decisions.
-3. Each committed utterance is aligned against the active sentence from the
-   current position (`lib/align.ts`, Needleman–Wunsch). Clean matches advance the
-   position; at most **one** help candidate is produced per utterance.
-4. Help waits ~1s (tunable) so the reader can self-correct. A prompt is both
-   spoken and shown as text. Input is ignored while the companion speaks.
-5. **Retry / Hear word / Explain / Continue** let the reader choose. The same
-   suggestion is never repeated. Finish shows the list of words practised.
+3. Each committed utterance follows the passage from the current position
+   (`lib/align.ts`), including speech spanning sentences. Exact prefixes advance
+   immediately. A mismatch needs two following exact words to support a suggestion;
+   uncertain or tied matches wait. Repetitions and short self-corrections are tolerated.
+   At most **one** help candidate is produced per utterance, and matched words after
+   it are retained so Retry/Continue do not require rereading them.
+4. Help waits ~1s after the committed transcript. Nonempty partial speech cancels
+   pending help to leave room for self-correction. A prompt is both spoken and
+   shown as text; the microphone is muted during playback.
+5. **Retry / Hear word / Explain / Continue** let the reader choose. An inconclusive
+   retry keeps these controls available. Successful retries are recorded only after
+   the expected word is recognised.
+6. `lib/reader-session.ts` owns connections, timers, requests, and audio. Stop,
+   passage changes, completion, and unmount invalidate callbacks and cancel pending
+   work. Completion closes the microphone; Read again resets the session.
+
+Alignment deliberately prefers waiting over a doubtful correction. It uses a small
+lookahead (up to three words), not a pronunciation assessment. A trailing mismatch
+without supporting words may produce no suggestion. Validate speech recognition,
+VAD timing, and speaker/microphone behaviour on real devices before a reader pilot.
 
 ### Accessibility notes
 
@@ -81,4 +94,10 @@ npm run dev     # dev server
 npm run build   # production build
 npm run start   # serve the production build
 npm run lint    # eslint
+npm run typecheck # generate Next.js types and check TypeScript
+npm test        # alignment, session lifecycle, and reader UI regressions
+npm run test:watch # watch tests during development
 ```
+
+Tests mock ElevenLabs, HTTP requests, and audio playback; they require no API keys
+and do not validate provider quality or physical microphone behaviour.

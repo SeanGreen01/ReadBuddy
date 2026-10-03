@@ -1,29 +1,14 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { useScribe, CommitStrategy } from "@elevenlabs/react";
-import {
-  groupBySentence,
-  normaliseTranscript,
-  tokenisePassage,
-} from "@/lib/normalize";
-import { alignUtterance } from "@/lib/align";
-import type {
-  Candidate,
-  CoachResponse,
-  PracticedWord,
-  ReaderStatus,
-  Token,
-} from "@/lib/types";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { groupBySentence } from "@/lib/normalize";
+import { ReaderSession } from "@/lib/reader-session";
+import type { ReaderStatus, Token } from "@/lib/types";
 import { PASSAGES } from "@/lib/passages";
-
-// Roughly one second pause before help is offered, per the spec. Tune during
-// rehearsal. A newer utterance that resolves the word cancels pending help,
-// which is what gives the reader room to self-correct.
-const HELP_DELAY_MS = 1000;
 
 const STATUS_LABEL: Record<ReaderStatus, string> = {
   idle: "Ready",
+  starting: "Starting microphone…",
   listening: "Listening",
   checking: "Checking",
   helping: "Offering help",
@@ -33,362 +18,21 @@ const STATUS_LABEL: Record<ReaderStatus, string> = {
 };
 
 export default function Reader() {
-  // ---- Passage selection / input -----------------------------------------
-  const [passageText, setPassageText] = useState(PASSAGES[0].text);
-  const [draftText, setDraftText] = useState(PASSAGES[0].text);
-
-  const tokens = useMemo<Token[]>(
-    () => tokenisePassage(passageText),
-    [passageText]
-  );
-  const sentences = useMemo(() => groupBySentence(tokens), [tokens]);
-  // Matchable tokens (non-punctuation) grouped by sentence id.
-  const matchableBySentence = useMemo(() => {
-    const map = new Map<number, Token[]>();
-    for (const t of tokens) {
-      if (t.normalised.length === 0) continue;
-      const list = map.get(t.sentenceId);
-      if (list) list.push(t);
-      else map.set(t.sentenceId, [t]);
-    }
-    return map;
-  }, [tokens]);
-
-  // ---- Rendered reader state ----------------------------------------------
-  const [status, setStatusState] = useState<ReaderStatus>("idle");
-  const [position, setPositionState] = useState(0);
-  const [readTokenIds, setReadTokenIds] = useState<Set<number>>(new Set());
-  const [pendingCandidate, setPendingCandidateState] =
-    useState<Candidate | null>(null);
-  const [partial, setPartial] = useState("");
-  const [lastCommitted, setLastCommitted] = useState("");
-  const [practiced, setPracticed] = useState<Map<number, PracticedWord>>(
-    new Map()
-  );
-  const [coach, setCoach] = useState<CoachResponse | null>(null);
-  const [spokenPrompt, setSpokenPrompt] = useState("");
-  const [connectionError, setConnectionError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  // ---- Settings -----------------------------------------------------------
+  const [session] = useState(() => new ReaderSession());
+  const state = useSyncExternalStore(session.subscribe, session.getSnapshot, session.getSnapshot);
+  useEffect(() => () => session.dispose(), [session]);
+  const { passageText, tokens, status, position, readTokenIds, pendingCandidate,
+    partial, lastCommitted, practiced, coach, spokenPrompt, connectionError, busy,
+    assistanceEnabled, offeredTokenIds, connected } = state;
+  const { start, stop, retry, continueReading, hearWord, explain } = session;
+  const [draftText, setDraftText] = useState(passageText);
   const [fontSize, setFontSize] = useState(30);
-  const [assistanceEnabled, setAssistanceEnabled] = useState(true);
   const [showDebug, setShowDebug] = useState(false);
-
-  // ---- Refs: the realtime source of truth for Scribe callbacks ------------
-  const positionRef = useRef(0);
-  const statusRef = useRef<ReaderStatus>("idle");
-  const pendingCandidateRef = useRef<Candidate | null>(null);
-  const alreadyOfferedRef = useRef<Set<number>>(new Set());
-  const isSpeakingRef = useRef(false);
-  const sessionIdRef = useRef(0);
-  const helpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const speakSeqRef = useRef(0);
-  const assistanceRef = useRef(true);
-
-  // ---- Synced setters (update ref + React state together) -----------------
-  const setStatus = useCallback((s: ReaderStatus) => {
-    statusRef.current = s;
-    setStatusState(s);
-  }, []);
-  const setPosition = useCallback((p: number) => {
-    positionRef.current = p;
-    setPositionState(p);
-  }, []);
-  const setPendingCandidate = useCallback((c: Candidate | null) => {
-    pendingCandidateRef.current = c;
-    setPendingCandidateState(c);
-  }, []);
-
+  const sentences = useMemo(() => groupBySentence(tokens), [tokens]);
   const activeSentenceId = tokens[position]?.sentenceId ?? sentences.length - 1;
-
-  // ---- Speech playback ----------------------------------------------------
-  const resumeAfterSpeak = useCallback(() => {
-    if (statusRef.current === "finished" || statusRef.current === "idle") return;
-    setStatus(pendingCandidateRef.current ? "helping" : "listening");
-  }, [setStatus]);
-
-  const speak = useCallback(
-    async (text: string, { thenResume = true }: { thenResume?: boolean } = {}) => {
-      const seq = ++speakSeqRef.current;
-      setSpokenPrompt(text);
-      if (audioRef.current) {
-        audioRef.current.pause();
-        audioRef.current = null;
-      }
-      isSpeakingRef.current = true;
-      setStatus("paused");
-      try {
-        const res = await fetch("/api/speak", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text, requestId: seq }),
-        });
-        if (seq !== speakSeqRef.current) return; // superseded
-        if (!res.ok) throw new Error(`speak ${res.status}`);
-        const blob = await res.blob();
-        if (seq !== speakSeqRef.current) return;
-        const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audioRef.current = audio;
-        audio.onended = () => {
-          URL.revokeObjectURL(url);
-          if (seq !== speakSeqRef.current) return;
-          isSpeakingRef.current = false;
-          if (thenResume) resumeAfterSpeak();
-        };
-        await audio.play();
-      } catch {
-        if (seq === speakSeqRef.current) {
-          isSpeakingRef.current = false;
-          setConnectionError("Could not play spoken audio (check ElevenLabs key).");
-          if (thenResume) resumeAfterSpeak();
-        }
-      }
-    },
-    [resumeAfterSpeak, setStatus]
-  );
-
-  // ---- Offer help for a candidate -----------------------------------------
-  const offerHelp = useCallback(
-    (candidate: Candidate) => {
-      if (!assistanceRef.current) {
-        // Assistance off: silently advance past the word, keep reading.
-        setPosition(candidate.tokenId + 1);
-        setStatus("listening");
-        return;
-      }
-      alreadyOfferedRef.current.add(candidate.tokenId);
-      setPendingCandidate(candidate);
-      setStatus("helping");
-      const prompt =
-        candidate.kind === "substitution"
-          ? `The word here is ${candidate.expected}. Would you like to try it again?`
-          : `Let's try this word: ${candidate.expected}.`;
-      void speak(prompt);
-    },
-    [setPendingCandidate, setPosition, setStatus, speak]
-  );
-
-  // ---- Core: handle a committed utterance ---------------------------------
-  const handleCommitted = useCallback(
-    (sessionAtEvent: number, text: string) => {
-      // Ignore stale sessions and anything spoken during companion playback.
-      if (sessionAtEvent !== sessionIdRef.current) return;
-      if (isSpeakingRef.current) return;
-      if (
-        statusRef.current === "idle" ||
-        statusRef.current === "finished" ||
-        statusRef.current === "paused"
-      )
-        return;
-
-      setLastCommitted(text);
-
-      // A fresh utterance cancels any pending help (room to self-correct).
-      if (helpTimerRef.current) {
-        clearTimeout(helpTimerRef.current);
-        helpTimerRef.current = null;
-      }
-
-      const pos = positionRef.current;
-      const activeId = tokens[pos]?.sentenceId;
-      if (activeId === undefined) return;
-      const sentenceTokens = matchableBySentence.get(activeId) ?? [];
-
-      const result = alignUtterance({
-        sentenceTokens,
-        position: pos,
-        heardWords: normaliseTranscript(text),
-        alreadyOffered: alreadyOfferedRef.current,
-      });
-
-      if (result.matchedTokenIds.length > 0) {
-        setReadTokenIds((prev) => {
-          const next = new Set(prev);
-          for (const id of result.matchedTokenIds) next.add(id);
-          return next;
-        });
-      }
-
-      setPosition(result.newPosition);
-
-      // Reached the end of the passage?
-      if (result.newPosition >= tokens.length) {
-        setPendingCandidate(null);
-        setStatus("finished");
-        return;
-      }
-
-      if (result.candidate) {
-        setStatus("checking");
-        const candidate = result.candidate;
-        helpTimerRef.current = setTimeout(() => {
-          helpTimerRef.current = null;
-          offerHelp(candidate);
-        }, HELP_DELAY_MS);
-      } else {
-        setPendingCandidate(null);
-        setStatus("listening");
-      }
-    },
-    [matchableBySentence, offerHelp, setPendingCandidate, setPosition, setStatus, tokens]
-  );
-
-  // ---- Scribe hook --------------------------------------------------------
-  const scribe = useScribe({
-    modelId: "scribe_v2_realtime",
-    commitStrategy: CommitStrategy.VAD,
-    languageCode: "en",
-    onSessionStarted: () => setConnectionError(null),
-    onPartialTranscript: (data: { text: string }) => {
-      if (isSpeakingRef.current) return;
-      setPartial(data.text);
-    },
-    onCommittedTranscript: (data: { text: string }) => {
-      setPartial("");
-      handleCommitted(sessionIdRef.current, data.text);
-    },
-    onError: (err: Error | Event) =>
-      setConnectionError(
-        err instanceof Error
-          ? err.message
-          : "Connection error with ElevenLabs Scribe."
-      ),
-    onDisconnect: () => {
-      if (statusRef.current !== "idle" && statusRef.current !== "finished") {
-        setConnectionError("Microphone disconnected.");
-      }
-    },
-  });
-
-  // ---- Controls -----------------------------------------------------------
-  const start = useCallback(async () => {
-    setBusy(true);
-    setConnectionError(null);
-    try {
-      const res = await fetch("/api/scribe-token", { method: "POST" });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error ?? `token ${res.status}`);
-      }
-      const { token } = await res.json();
-      sessionIdRef.current += 1;
-      await scribe.connect({
-        token,
-        microphone: { echoCancellation: true, noiseSuppression: true },
-      });
-      setStatus("listening");
-    } catch (err) {
-      setConnectionError(
-        err instanceof Error ? err.message : "Could not start listening."
-      );
-      setStatus("idle");
-    } finally {
-      setBusy(false);
-    }
-  }, [scribe, setStatus]);
-
-  const stop = useCallback(() => {
-    if (helpTimerRef.current) clearTimeout(helpTimerRef.current);
-    helpTimerRef.current = null;
-    sessionIdRef.current += 1; // invalidate in-flight transcripts
-    if (scribe.isConnected) scribe.disconnect();
-    if (audioRef.current) {
-      audioRef.current.pause();
-      audioRef.current = null;
-    }
-    isSpeakingRef.current = false;
-    setStatus(positionRef.current >= tokens.length ? "finished" : "idle");
-  }, [scribe, setStatus, tokens.length]);
-
-  const recordPractice = useCallback(
-    (candidate: Candidate, outcome: PracticedWord["outcome"]) => {
-      setPracticed((prev) => {
-        const next = new Map(prev);
-        next.set(candidate.tokenId, {
-          tokenId: candidate.tokenId,
-          word: candidate.expected,
-          outcome,
-        });
-        return next;
-      });
-    },
-    []
-  );
-
-  const retry = useCallback(() => {
-    const candidate = pendingCandidateRef.current;
-    if (!candidate) return;
-    recordPractice(candidate, "retried");
-    setPendingCandidate(null);
-    setStatus("retrying");
-  }, [recordPractice, setPendingCandidate, setStatus]);
-
-  const continueReading = useCallback(() => {
-    const candidate = pendingCandidateRef.current;
-    if (candidate) {
-      recordPractice(candidate, "dismissed");
-      setPosition(candidate.tokenId + 1);
-    }
-    setPendingCandidate(null);
-    setCoach(null);
-    if (positionRef.current >= tokens.length) setStatus("finished");
-    else setStatus("listening");
-  }, [recordPractice, setPendingCandidate, setPosition, setStatus, tokens.length]);
-
-  const hearWord = useCallback(() => {
-    const candidate = pendingCandidateRef.current;
-    if (candidate) void speak(candidate.expected);
-  }, [speak]);
-
-  const explain = useCallback(async () => {
-    const candidate = pendingCandidateRef.current;
-    if (!candidate) return;
-    recordPractice(candidate, "explained");
-    setBusy(true);
-    try {
-      const sentence = (sentences[activeSentenceId] ?? [])
-        .map((t) => t.display)
-        .join(" ");
-      const res = await fetch("/api/coach", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          word: candidate.expected,
-          sentence,
-          requestId: Date.now(),
-        }),
-      });
-      const data: CoachResponse = await res.json();
-      setCoach(data);
-      void speak(data.explanation);
-    } catch {
-      setConnectionError("Could not fetch an explanation.");
-    } finally {
-      setBusy(false);
-    }
-  }, [activeSentenceId, recordPractice, sentences, speak]);
-
-  const loadPassage = useCallback(
-    (text: string) => {
-      stop();
-      setPassageText(text);
-      setDraftText(text);
-      setPosition(0);
-      setReadTokenIds(new Set());
-      setPendingCandidate(null);
-      alreadyOfferedRef.current = new Set();
-      setPracticed(new Map());
-      setCoach(null);
-      setSpokenPrompt("");
-      setLastCommitted("");
-      setPartial("");
-      setStatus("idle");
-    },
-    [setPendingCandidate, setPosition, setStatus, stop]
-  );
+  const loadPassage = (text: string) => {
+    if (session.loadPassage(text)) setDraftText(text);
+  };
 
   // ---- Derived flags for rendering ----------------------------------------
   const isActive = status !== "idle" && status !== "finished";
@@ -417,8 +61,7 @@ export default function Reader() {
               type="checkbox"
               checked={assistanceEnabled}
               onChange={(e) => {
-                setAssistanceEnabled(e.target.checked);
-                assistanceRef.current = e.target.checked;
+                session.setAssistance(e.target.checked);
               }}
             />
             Assistance
@@ -487,7 +130,7 @@ export default function Reader() {
       {pendingCandidate && (
         <div className="rounded-xl border border-sky-300 bg-sky-50 p-4">
           <p className="mb-3 text-slate-800">
-            The word here is{" "}
+            {pendingCandidate.kind === "skip" ? "Let's try this word: " : "The word here is "}
             <span className="font-semibold underline decoration-sky-500 decoration-2">
               {pendingCandidate.expected}
             </span>
@@ -539,7 +182,7 @@ export default function Reader() {
           </h2>
           {practicedList.length === 0 ? (
             <p className="text-sm text-emerald-800">
-              You read the whole passage with no help needed.
+              You reached the end of the passage.
             </p>
           ) : (
             <>
@@ -575,7 +218,9 @@ export default function Reader() {
               </Btn>
             ))}
           </div>
+          <label htmlFor="passage">Passage text</label>
           <textarea
+            id="passage"
             className="min-h-24 w-full rounded-md border border-slate-300 p-2"
             value={draftText}
             onChange={(e) => setDraftText(e.target.value)}
@@ -600,7 +245,7 @@ export default function Reader() {
           <dt>Status</dt>
           <dd>{status}</dd>
           <dt>Connected</dt>
-          <dd>{String(scribe.isConnected)}</dd>
+          <dd>{String(connected)}</dd>
           <dt>Position</dt>
           <dd>
             {position} / {tokens.length}
@@ -618,7 +263,7 @@ export default function Reader() {
           <dt>Coach source</dt>
           <dd>{coach?.source ?? "—"}</dd>
           <dt>Already offered</dt>
-          <dd>{Array.from(alreadyOfferedRef.current).join(", ") || "—"}</dd>
+          <dd>{Array.from(offeredTokenIds).join(", ") || "—"}</dd>
         </dl>
       </details>
     </div>

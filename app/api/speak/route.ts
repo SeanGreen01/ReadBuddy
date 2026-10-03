@@ -50,6 +50,7 @@ export async function POST(req: Request) {
       `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}?output_format=mp3_44100_128`,
       {
         method: "POST",
+        signal: AbortSignal.any([req.signal, AbortSignal.timeout(15_000)]),
         headers: {
           "xi-api-key": apiKey,
           "Content-Type": "application/json",

@@ -85,7 +85,7 @@ export async function POST(req: Request) {
 
     const upstream = await fetch(apiUrl, {
       method: "POST",
-      signal: controller.signal,
+      signal: AbortSignal.any([req.signal, controller.signal]),
       headers: {
         "Content-Type": "application/json",
         ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),

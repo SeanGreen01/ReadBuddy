@@ -42,6 +42,7 @@ export interface Candidate {
 
 export type ReaderStatus =
   | "idle" // not started
+  | "starting" // requesting permission / opening a connection
   | "listening" // mic open, following along
   | "checking" // utterance committed, running alignment
   | "helping" // offering a candidate / speaking a prompt
