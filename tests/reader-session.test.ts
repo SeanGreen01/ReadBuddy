@@ -180,7 +180,8 @@ describe("reader session lifecycle", () => {
     pending.resolve(json({ word: "cat", explanation: "Late explanation", source: "model" }));
     await explaining;
     expect(session.getSnapshot()).toMatchObject({ status: "idle", passageText: "Go home.", coach: null });
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/speak")).toHaveLength(1);
+    // offer prompt + instant sound-out were spoken; the late meaning was dropped.
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/speak")).toHaveLength(2);
   });
   it("drops late explanations after Continue and finishes", async () => {
     const connection = await start();
@@ -202,7 +203,8 @@ describe("reader session lifecycle", () => {
     expect(session.getSnapshot().coach).toBeNull();
     expect(session.getSnapshot().connectionError).toContain("Could not fetch");
     expect(session.getSnapshot().busy).toBe(false);
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/speak")).toHaveLength(1);
+    // offer prompt + instant sound-out were spoken; the bad meaning was not.
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/speak")).toHaveLength(2);
   });
   it("postpones help when the reader begins correcting themselves", async () => {
     const connection = await start();
@@ -221,16 +223,33 @@ describe("reader session lifecycle", () => {
     await vi.advanceTimersByTimeAsync(1000);
     expect(session.getSnapshot().pendingCandidate?.expected).toBe("cat");
   });
-  it("Retry cancels audio and only records practice after hearing the word", async () => {
+  it("records a prompted word on offer and upgrades it to retried after the word is read", async () => {
     const connection = await start();
     await offer(connection);
+    // The struggled word is captured as soon as help is offered.
+    expect(session.getSnapshot().practiced.get(1)?.outcome).toBe("prompted");
     session.retry();
     expect(Playback.instances[0].pause).toHaveBeenCalled();
     expect(connection.isMuted).toBe(false);
-    expect(session.getSnapshot().practiced.size).toBe(0);
+    expect(session.getSnapshot().practiced.get(1)?.outcome).toBe("prompted");
     connection.say("cat");
     expect(session.getSnapshot().status).toBe("finished");
+    // Reading it correctly upgrades the outcome.
     expect(session.getSnapshot().practiced.get(1)?.outcome).toBe("retried");
+  });
+  it("lists a struggled word even when the reader just re-reads, no button pressed", async () => {
+    const connection = await start();
+    await offer(connection); // mismatch on "cat" -> help offered automatically
+    expect(session.getSnapshot().practiced.get(1)).toMatchObject({
+      word: "cat",
+      outcome: "prompted",
+    });
+    Playback.instances[0].onended?.(); // companion finishes speaking, mic resumes
+    connection.say("cat"); // re-read correctly without pressing Retry
+    expect(session.getSnapshot().status).toBe("finished");
+    expect([...session.getSnapshot().practiced.values()].map((w) => w.word)).toEqual([
+      "cat",
+    ]);
   });
   it("keeps Continue available after an inconclusive retry", async () => {
     const connection = await start();
@@ -258,13 +277,15 @@ describe("reader session lifecycle", () => {
     const pending = deferred<Response>();
     fetchMock.mockReturnValueOnce(pending.promise);
     const explaining = session.explain();
-    const signal = fetchMock.mock.calls.at(-1)?.[1]?.signal as AbortSignal;
+    const signal = fetchMock.mock.calls.find(([url]) => url === "/api/coach")?.[1]
+      ?.signal as AbortSignal;
     session.stop();
     expect(signal.aborted).toBe(true);
     pending.resolve(json({ word: "cat", explanation: "Late explanation", source: "model" }));
     await explaining;
     expect(session.getSnapshot()).toMatchObject({ status: "idle", coach: null, busy: false });
-    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/speak")).toHaveLength(1);
+    // offer prompt + instant sound-out were spoken; the late meaning was dropped.
+    expect(fetchMock.mock.calls.filter(([url]) => url === "/api/speak")).toHaveLength(2);
   });
   it("completes with assistance disabled even when the utterance has a mismatch", async () => {
     session.setAssistance(false);

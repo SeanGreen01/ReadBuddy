@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { groupBySentence } from "@/lib/normalize";
+import { soundOut } from "@/lib/syllabify";
 import { ReaderSession } from "@/lib/reader-session";
 import type { ReaderStatus, Token } from "@/lib/types";
 import { PASSAGES } from "@/lib/passages";
@@ -130,22 +131,38 @@ export default function Reader() {
       {pendingCandidate && (
         <div className="rounded-xl border border-sky-300 bg-sky-50 p-4">
           <p className="mb-3 text-slate-800">
-            {pendingCandidate.kind === "skip" ? "Let's try this word: " : "The word here is "}
+            That&rsquo;s okay — the word here is{" "}
             <span className="font-semibold underline decoration-sky-500 decoration-2">
               {pendingCandidate.expected}
             </span>
-            . Would you like to try it again?
+            . Try saying it again.
           </p>
-          {coach && (
-            <p className="mb-3 text-sm text-slate-700">
-              <span className="font-medium">Meaning: </span>
-              {coach.explanation}
-              {coach.source === "fallback" && (
-                <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-600">
-                  offline definition
+          {(busy || coach) && (
+            <div className="mb-3 text-sm text-slate-700">
+              <p className="mt-1">
+                <span className="font-medium">
+                  {soundOut(pendingCandidate.expected).mode === "syllables"
+                    ? "Sound it out: "
+                    : "Spell it out: "}
                 </span>
+                <span className="tracking-wide">
+                  {soundOut(pendingCandidate.expected).display}
+                </span>
+              </p>
+              {coach ? (
+                <p className="mt-1">
+                  <span className="font-medium">Meaning: </span>
+                  {coach.explanation}
+                  {coach.source === "fallback" && (
+                    <span className="ml-2 rounded bg-slate-200 px-1.5 py-0.5 text-xs text-slate-600">
+                      offline definition
+                    </span>
+                  )}
+                </p>
+              ) : (
+                <p className="mt-1 text-slate-500">Finding a meaning…</p>
               )}
-            </p>
+            </div>
           )}
           <div className="flex flex-wrap gap-2">
             <Btn onClick={retry} primary>
@@ -177,31 +194,35 @@ export default function Reader() {
       {/* Finished summary */}
       {status === "finished" && (
         <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-4">
-          <h2 className="mb-2 font-semibold text-emerald-900">
+          <h2 className="mb-1 font-semibold text-emerald-900">
             Nice work — passage finished.
           </h2>
-          {practicedList.length === 0 ? (
-            <p className="text-sm text-emerald-800">
-              You reached the end of the passage.
-            </p>
-          ) : (
-            <>
-              <p className="mb-2 text-sm text-emerald-800">
-                Words you practised:
-              </p>
-              <ul className="flex flex-wrap gap-2">
-                {practicedList.map((w) => (
-                  <li
-                    key={w.tokenId}
-                    className="rounded-full border border-emerald-300 bg-white px-3 py-1 text-sm text-emerald-900"
-                  >
-                    {w.word}{" "}
-                    <span className="text-emerald-600">({w.outcome})</span>
-                  </li>
-                ))}
-              </ul>
-            </>
-          )}
+          <p className="text-sm text-emerald-800">
+            {practicedList.length === 0
+              ? "You read the whole passage with no help needed."
+              : `You practised ${practicedList.length} ${
+                  practicedList.length === 1 ? "word" : "words"
+                } — see the list below.`}
+          </p>
+        </div>
+      )}
+
+      {/* Persistent list of words the reader has struggled with this session */}
+      {practicedList.length > 0 && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <h2 className="mb-2 text-sm font-semibold text-amber-900">
+            Words you&rsquo;re practising
+          </h2>
+          <ul className="flex flex-wrap gap-2">
+            {practicedList.map((w) => (
+              <li
+                key={w.tokenId}
+                className="rounded-full border border-amber-300 bg-white px-3 py-1 text-sm text-amber-900"
+              >
+                {w.word}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 

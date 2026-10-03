@@ -1,6 +1,7 @@
 import { CommitStrategy, RealtimeEvents, Scribe, type RealtimeConnection } from "@elevenlabs/client";
 import { alignUtterance, nextUnreadPosition } from "./align";
 import { normaliseTranscript, tokenisePassage } from "./normalize";
+import { soundOut } from "./syllabify";
 import { PASSAGES } from "./passages";
 import type { Candidate, CoachResponse, PracticedWord, ReaderStatus, Token } from "./types";
 
@@ -252,8 +253,15 @@ export class ReaderSession {
       this.helpTimer = null;
       if (generation !== this.generation || version !== this.helpVersion) return;
       const offeredTokenIds = new Set(this.snapshot.offeredTokenIds).add(candidate.tokenId);
+      // Record the struggle the moment help is offered, so the practice list
+      // captures it even if the reader just re-reads without pressing a button.
+      this.recordPractice(candidate, "prompted");
       this.update({ pendingCandidate: candidate, offeredTokenIds, status: "helping" });
-      void this.speak(`Would you like to try this word: ${candidate.expected}?`);
+      // Reassure, name the specific word, and invite a repeat — no button press.
+      void this.speak(
+        `That's okay. The word here is ${candidate.expected}. ` +
+          `Let's try it again — can you say ${candidate.expected}?`
+      );
     }, HELP_DELAY_MS);
   }
 
@@ -341,21 +349,27 @@ export class ReaderSession {
     const candidate = this.snapshot.pendingCandidate;
     if (!candidate) return;
     this.cancelHelp();
-    this.resumeListening();
-    if (!this.connection || !this.snapshot.pendingCandidate) return;
+    this.recordPractice(candidate, "explained");
+    if (!this.connection) return;
     const version = this.helpVersion;
     const generation = this.generation;
     const current = () => generation === this.generation && version === this.helpVersion;
     const controller = this.request();
     this.coachRequest = controller;
     this.update({ busy: true, coach: null });
+    // Start the (slow) model request first so it's in flight, then give the
+    // reader instant, offline pronunciation help without waiting on it.
+    const sentenceId = this.snapshot.tokens[candidate.tokenId].sentenceId;
+    const sentence = this.snapshot.tokens.filter((t) => t.sentenceId === sentenceId)
+      .map((t) => t.display).join(" ");
+    const coachRequest = fetch("/api/coach", { method: "POST", signal: controller.signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ word: candidate.expected, sentence }) });
+    const guide = soundOut(candidate.expected);
+    const lead = guide.mode === "syllables" ? "Let's sound it out" : "Let's spell it out";
+    void this.speak(`${lead}: ${guide.spoken}.`);
     try {
-      const sentenceId = this.snapshot.tokens[candidate.tokenId].sentenceId;
-      const sentence = this.snapshot.tokens.filter((t) => t.sentenceId === sentenceId)
-        .map((t) => t.display).join(" ");
-      const response = await fetch("/api/coach", { method: "POST", signal: controller.signal,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ word: candidate.expected, sentence }) });
+      const response = await coachRequest;
       if (!current()) return;
       if (!response.ok) throw new Error("Explanation request failed");
       const data = await response.json() as CoachResponse;
@@ -364,7 +378,7 @@ export class ReaderSession {
         || data.word !== candidate.expected || !["model", "fallback"].includes(data.source)) {
         throw new Error("Invalid explanation");
       }
-      this.recordPractice(candidate, "explained");
+      // The meaning follows once ready; the sound-out has already been spoken.
       this.update({ coach: data });
       void this.speak(data.explanation);
     } catch {

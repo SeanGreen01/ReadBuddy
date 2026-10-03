@@ -66,7 +66,9 @@ export interface ReaderState {
 export interface PracticedWord {
   tokenId: number;
   word: string;
-  outcome: "retried" | "dismissed" | "explained";
+  // "prompted" is recorded when help is first offered; it is upgraded if the
+  // reader then retries, dismisses (Continue), or asks for an explanation.
+  outcome: "prompted" | "retried" | "dismissed" | "explained";
 }
 
 /** Response shape of POST /api/coach. */
