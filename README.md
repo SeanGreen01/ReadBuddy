@@ -16,8 +16,9 @@ word, ask for a short meaning, or keep going at their own pace.
 - **Next.js 16 + TypeScript** (App Router), Tailwind v4
 - **ElevenLabs** Scribe `scribe_v2_realtime` for live listening and
   `eleven_flash_v2_5` for spoken prompts (via `@elevenlabs/client` + REST)
-- **Qwen3 4B/8B** (open weight, Apache 2.0) for optional word explanations,
-  with a reviewed offline fallback
+- **Google Gemma 4** (open weight, Apache 2.0) for optional word explanations,
+  via the Gemini API's OpenAI-compatible endpoint, with a reviewed offline
+  fallback (swappable for any OpenAI-compatible endpoint)
 
 All state (passage, position, pending help, practice list) is kept in memory.
 No accounts, no database.
@@ -36,12 +37,13 @@ npm run dev                         # http://localhost:3000
 | --------------------- | -------- | -------------------------------------------------------------- |
 | `ELEVENLABS_API_KEY`  | yes      | Listening + speaking. Stays server-side only.                  |
 | `ELEVENLABS_VOICE_ID` | no       | Preselected prompt voice (defaults to "Sarah").               |
-| `QWEN_API_URL`        | no       | OpenAI-compatible chat-completions URL for the Explain feature.|
-| `QWEN_MODEL`          | no       | Model name (default `qwen3-4b`).                               |
-| `QWEN_API_KEY`        | no       | Bearer token for the Qwen endpoint, if it needs one.           |
+| `COACH_API_KEY`       | no       | Gemini API key for Gemma 4 (the Explain feature). Get one at https://aistudio.google.com/apikey. |
+| `COACH_MODEL`         | no       | Model id (default `gemma-4-26b-a4b-it`; or `gemma-4-31b-it`).  |
+| `COACH_API_URL`       | no       | Override to point Explain at any other OpenAI-compatible endpoint (e.g. a local runtime). |
 
-Without `QWEN_API_URL`, **Explain** returns a short reviewed definition labelled
-*offline* — the listening/speaking loop works regardless.
+With neither `COACH_API_KEY` nor `COACH_API_URL` set, **Explain** returns a short
+reviewed definition labelled *offline* — the listening/speaking loop works
+regardless.
 
 ## Server routes
 

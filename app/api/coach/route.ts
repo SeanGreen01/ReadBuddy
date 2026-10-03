@@ -2,14 +2,25 @@ import { NextResponse } from "next/server";
 import type { CoachResponse } from "@/lib/types";
 
 // POST /api/coach  { word, sentence, requestId }  ->  CoachResponse
-// Asks an open-weight model (Qwen3 4B/8B via an OpenAI-compatible endpoint)
-// for a short, child-friendly explanation of `word` as used in `sentence`.
-// On any failure it returns a short reviewed definition labelled as fallback,
-// so the voice + alignment loop never depends on the language model.
+// Asks an open-weight model for a short, child-friendly explanation of `word`
+// as used in `sentence`. Defaults to Google Gemma 4 via the Gemini API's
+// OpenAI-compatible endpoint, but works with any OpenAI-compatible chat
+// completions endpoint (e.g. a local runtime). On any failure it returns a
+// short reviewed definition labelled as fallback, so the voice + alignment
+// loop never depends on the language model.
 
-const TIMEOUT_MS = 8000;
+// Gemma 4 is a reasoning model and always "thinks" before answering (thinking
+// cannot be disabled on gemma-4-26b-a4b-it), so a call takes several seconds.
+// Keep this under the client's 15s request abort.
+const TIMEOUT_MS = 13000;
 const MAX_WORD = 40;
 const MAX_SENTENCE = 300;
+
+// Google Gemini API, OpenAI-compatible surface. Gemma 4 is served here.
+const DEFAULT_COACH_URL =
+  "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+// Fast MoE Gemma 4 (≈4B active). Swap to "gemma-4-31b-it" for the dense model.
+const DEFAULT_COACH_MODEL = "gemma-4-26b-a4b-it";
 
 // A few reviewed definitions for words likely to appear in the sample
 // passages. Used when the model is unavailable. Kept deliberately short.
@@ -25,6 +36,22 @@ const REVIEWED: Record<string, string> = {
   bread: "Bread is a food made by baking flour and water.",
   quiet: "Quiet means making little or no noise.",
   empty: "Empty means having nothing inside.",
+  kitten: "A kitten is a very young cat.",
+  gate: "A gate is a door in a fence or wall.",
+  knelt: "Knelt means went down on your knees.",
+  milk: "Milk is the white drink that comes from cows.",
+  waves: "Waves are the moving lines of water on the sea.",
+  sand: "Sand is the tiny bits of rock on a beach.",
+  castle: "A castle is a big, strong building — here one made of sand.",
+  boat: "A boat is a small craft that travels on water.",
+  sea: "The sea is the large body of salty water.",
+  corner: "A corner is where two roads or edges meet.",
+  board: "To get on board means to climb onto a bus, boat, or train.",
+  soil: "Soil is the dark earth that plants grow in.",
+  seed: "A seed is the tiny part that a new plant grows from.",
+  shoot: "A shoot is a new, young part of a plant.",
+  ground: "The ground is the surface of the earth under our feet.",
+  bus: "A bus is a large vehicle that carries many people.",
 };
 
 function fallbackFor(word: string): string {
@@ -35,9 +62,13 @@ function fallbackFor(word: string): string {
   );
 }
 
-/** Strip any <think>...</think> block some reasoning models may emit. */
+/** Strip any reasoning block before the final answer. Gemma emits
+ * <thought>...</thought>; other models use <think>...</think>. */
 function stripThinking(text: string): string {
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+  return text
+    .replace(/<thought>[\s\S]*?<\/thought>/gi, "")
+    .replace(/<think(?:ing)?>[\s\S]*?<\/think(?:ing)?>/gi, "")
+    .trim();
 }
 
 export async function POST(req: Request) {
@@ -59,12 +90,14 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Missing 'word'." }, { status: 400 });
   }
 
-  const apiUrl = process.env.QWEN_API_URL; // e.g. https://host/v1/chat/completions
-  const model = process.env.QWEN_MODEL || "qwen3-4b";
-  const apiKey = process.env.QWEN_API_KEY; // optional for local runtimes
+  const apiKey = process.env.COACH_API_KEY; // Gemini API key for the hosted default
+  const customUrl = process.env.COACH_API_URL; // override for a local/other endpoint
+  const apiUrl = customUrl || DEFAULT_COACH_URL;
+  const model = process.env.COACH_MODEL || DEFAULT_COACH_MODEL;
 
-  // No endpoint configured -> immediate reviewed fallback.
-  if (!apiUrl) {
+  // Need a key for the hosted endpoint, or a custom endpoint for local runtimes
+  // (which often need no key). With neither, return a reviewed fallback.
+  if (!apiKey && !customUrl) {
     const res: CoachResponse = {
       word,
       explanation: fallbackFor(word),
@@ -77,11 +110,12 @@ export async function POST(req: Request) {
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
+    // Gemma has no separate system role, so fold the instruction into the one
+    // user turn. This stays valid for other OpenAI-compatible models too.
     const prompt =
-      `Explain the word "${word}" as it is used in this sentence: ` +
-      `"${sentence}". Give one short, friendly sentence a young reader ` +
-      `could understand. Do not repeat the sentence. Reply with only the ` +
-      `explanation. /no_think`;
+      `You are a patient reading helper. Explain the word "${word}" as it is ` +
+      `used in this sentence: "${sentence}". Reply with one short, friendly ` +
+      `sentence a young reader could understand. Do not repeat the sentence.`;
 
     const upstream = await fetch(apiUrl, {
       method: "POST",
@@ -92,18 +126,11 @@ export async function POST(req: Request) {
       },
       body: JSON.stringify({
         model,
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are a patient reading helper. Keep explanations to one short, plain sentence.",
-          },
-          { role: "user", content: prompt },
-        ],
+        messages: [{ role: "user", content: prompt }],
         temperature: 0.3,
-        max_tokens: 80,
-        // Qwen3 non-thinking mode where the server honours it.
-        chat_template_kwargs: { enable_thinking: false },
+        // Gemma 4 spends tokens on an internal <thought> block before the
+        // answer, so budget enough for both; we strip the thought after.
+        max_tokens: 1024,
       }),
     });
 
