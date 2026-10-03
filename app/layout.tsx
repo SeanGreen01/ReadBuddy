@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Read Along — reading companion",
+  title: "ReadBuddy — your reading corner",
   description:
     "A patient reading companion that listens and offers gentle, optional help.",
 };
