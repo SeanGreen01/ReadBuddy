@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+}
+
+/* Respect readers who prefer less motion. */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
